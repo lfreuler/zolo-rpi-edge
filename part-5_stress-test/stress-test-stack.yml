@@ -1,0 +1,232 @@
+version: '3.8'
+
+services:
+  # CPU + Memory Stress Test (ARM64 compatible)
+  stress-compute:
+    image: alpine:latest
+    command:
+      - sh
+      - -c
+      - |
+        echo "=== CPU + Memory Stress on $${NODE_NAME} ==="
+        
+        # Install stress-ng (ARM64 compatible)
+        apk add --no-cache stress-ng
+        
+        # Run stress test for 5 minutes
+        stress-ng --cpu 4 --vm 2 --vm-bytes 512M --timeout 300s --metrics-brief
+        
+        echo "=== Stress completed on $${NODE_NAME} ==="
+    deploy:
+      mode: global
+      resources:
+        limits:
+          cpus: '3.5'
+          memory: 1536M
+        reservations:
+          cpus: '2'
+          memory: 1024M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+    environment:
+      - NODE_NAME={{.Node.Hostname}}
+    labels:
+      - "stress.type=compute"
+    networks:
+      - stress-net
+
+  # Disk I/O Stress Test mit Node-spezifischen Ordnern
+  stress-io:
+    image: alpine:latest
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "=== Starting I/O Stress on $${NODE_NAME} ==="
+        
+        # Node-spezifischer Ordner
+        NODE_DIR="/data/stress-test/$${NODE_NAME}"
+        mkdir -p $${NODE_DIR}
+        
+        echo "Writing to: $${NODE_DIR}"
+        
+        # Start time
+        START=$$(date +%s)
+        END=$$((START + 300))
+        COUNTER=0
+        
+        # Test Loop (5 Minuten)
+        while [ $$(date +%s) -lt $${END} ]; do
+          COUNTER=$$((COUNTER+1))
+          
+          echo "Cycle $${COUNTER} on $${NODE_NAME}"
+          
+          # 100MB File schreiben
+          dd if=/dev/urandom of=$${NODE_DIR}/test-$${COUNTER}.dat bs=1M count=100 2>&1 | tail -2
+          
+          # File lesen
+          dd if=$${NODE_DIR}/test-$${COUNTER}.dat of=/dev/null bs=1M 2>&1 | tail -2
+          
+          # Alte Files cleanup (keep last 3)
+          ls -t $${NODE_DIR}/test-*.dat 2>/dev/null | tail -n +4 | xargs -r rm -f
+          
+          echo "Cycle $${COUNTER} completed on $${NODE_NAME}"
+          sleep 2
+        done
+        
+        echo "=== I/O Stress completed on $${NODE_NAME} ==="
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+    environment:
+      - NODE_NAME={{.Node.Hostname}}
+    volumes:
+      - type: bind
+        source: /mnt/glusterfs-swarm
+        target: /data
+    labels:
+      - "stress.type=io"
+    networks:
+      - stress-net
+
+  # Combined Heavy Load Test
+  stress-combined:
+    image: alpine:latest
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache bash bc
+        
+        echo "=== Combined Stress Test on $${NODE_NAME} ==="
+        NODE_DIR="/data/stress-test-combined/$${NODE_NAME}"
+        mkdir -p $${NODE_DIR}
+        
+        # Function: CPU intensive calculation
+        cpu_burn() {
+          echo "scale=5000; a(1)*4" | bc -l > /dev/null
+        }
+        
+        # Function: Memory allocation
+        mem_stress() {
+          dd if=/dev/zero of=/tmp/memstress bs=1M count=256 2>/dev/null
+          cat /tmp/memstress > /dev/null
+          rm -f /tmp/memstress
+        }
+        
+        # Start time
+        START=$$(date +%s)
+        END=$$((START + 300))
+        
+        # Main loop
+        while [ $$(date +%s) -lt $${END} ]; do
+          # Parallel CPU stress (4 processes)
+          for i in 1 2 3 4; do
+            cpu_burn &
+          done
+          
+          # Memory stress
+          mem_stress &
+          
+          # Disk I/O
+          dd if=/dev/urandom of=$${NODE_DIR}/load-$$(date +%s).dat bs=1M count=50 2>/dev/null
+          
+          # Wait and cleanup
+          wait
+          find $${NODE_DIR} -name "load-*.dat" -mmin +1 -delete
+          
+          echo "Load cycle completed on $${NODE_NAME} at $$(date)"
+          sleep 5
+        done
+        
+        echo "=== Combined Stress completed on $${NODE_NAME} ==="
+    deploy:
+      mode: global
+      resources:
+        limits:
+          cpus: '3'
+          memory: 1024M
+        reservations:
+          cpus: '1.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+    environment:
+      - NODE_NAME={{.Node.Hostname}}
+    volumes:
+      - type: bind
+        source: /mnt/glusterfs-swarm
+        target: /data
+    labels:
+      - "stress.type=combined"
+    networks:
+      - stress-net
+
+  # Monitoring Service (läuft nur auf Manager)
+  monitor:
+    image: alpine:latest
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache curl
+        
+        echo "=== Stress Test Monitor on $${NODE_NAME} ==="
+        echo "Monitoring for 5 minutes..."
+        echo ""
+        
+        START=$$(date +%s)
+        END=$$((START + 300))
+        
+        while [ $$(date +%s) -lt $${END} ]; do
+          echo "=== Status at $$(date) ==="
+          echo "Uptime: $$(cat /proc/uptime | cut -d' ' -f1)s"
+          echo "Load Average: $$(cat /proc/loadavg)"
+          echo "Memory:"
+          free -h | grep -E "Mem|Swap"
+          echo ""
+          
+          # Check GlusterFS mount
+          if mountpoint -q /data; then
+            echo "✅ GlusterFS mounted"
+            df -h /data | tail -1
+          else
+            echo "❌ GlusterFS NOT mounted"
+          fi
+          
+          echo "---"
+          sleep 30
+        done
+        
+        echo "=== Monitor completed ==="
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+    environment:
+      - NODE_NAME={{.Node.Hostname}}
+    volumes:
+      - type: bind
+        source: /mnt/glusterfs-swarm
+        target: /data
+        read_only: true
+    labels:
+      - "stress.type=monitor"
+    networks:
+      - stress-net
+
+networks:
+  stress-net:
+    driver: overlay
+    attachable: true
