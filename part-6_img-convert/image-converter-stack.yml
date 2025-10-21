@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  image-converter:
+    image: zolo/image-converter:latest
+    
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          # Läuft automatisch auf Node wo Samba VIP aktiv ist
+          - node.labels.samba.vip.active == true
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    environment:
+      # Directories (mounted from GlusterFS)
+      SOURCE_DIR: /data/source
+      DEST_DIR: /data/destination
+      
+      # Image processing settings
+      MAX_WIDTH: 1920          # Maximum width in pixels
+      MAX_HEIGHT: 1080         # Maximum height in pixels
+      QUALITY: 85              # JPEG quality (1-100)
+      FORMATS: jpg,jpeg,png,webp  # Supported formats
+      
+      # Logging
+      LOG_LEVEL: INFO          # DEBUG, INFO, WARNING, ERROR
+      TZ: Europe/Zurich        # Timezone for cron
+    
+    volumes:
+      # Source: USB NAS Storage (Original Photos)
+      - type: bind
+        source: /mnt/usb-nas-master/data/luggie/backup/photos
+        target: /data/source
+      
+      # Destination: USB NAS (Resized Photos)
+      - type: bind
+        source: /mnt/usb-nas-master/data/luggie/backup/photos-resized
+        target: /data/destination
+      
+      # Logs on GlusterFS (Container Workload)
+      - type: bind
+        source: /mnt/glusterfs-swarm/logs/image-converter
+        target: /var/log
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Instructions:
+#
+# 1. Setup Node Labels:
+#    ./setup-nas-labels.sh
+#
+# 2. Build Image:
+#    docker build -t zolo/image-converter:latest .
+#
+# 3. Deploy:
+#    docker stack deploy -c image-converter-stack.yml imageconv
+#
+# 4. Check placement (should be on pi-4):
+#    docker service ps imageconv_image-converter
+#
+# 5. View logs:
+#    docker service logs -f imageconv_image-converter
